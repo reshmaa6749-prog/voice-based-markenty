@@ -1,0 +1,1455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice-Based Mark Entry with Dynamic Subjects</title>
+
+  <!-- Load essential libraries from CDN first -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  
+  <!-- IMPORTANT: Load Firebase SDKs from CDN *before* your main script -->
+  <!-- Using compat versions to ensure they attach to the global 'firebase' object -->
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
+
+  <script>
+    // Define global configuration variables from Canvas environment
+    // These should be replaced with your actual Firebase configuration
+    const firebaseConfig = {
+      apiKey: "AIzaSyCRBJ0Bp1sku05bdoXcl32X2jymFqfIvN8",
+      authDomain: "voice-5d80b.firebaseapp.com",
+      projectId: "voice-5d80b",
+      storageBucket: "voice-5d80b.firebasestorage.app",
+      messagingSenderId: "207825624466",
+      appId: "1:207825624466:web:0a552ebeae9ef64b34754b",
+      measurementId: "G-EEBKWQT705"
+    };
+    const appId = firebaseConfig.appId; // Use the appId from your firebaseConfig for consistency
+    const initialAuthToken = null; // Keep this as null unless you have a specific token to use
+
+    console.log("Global: Firebase config loaded:", firebaseConfig); // Debugging
+    console.log("Global: App ID:", appId); // Debugging
+    console.log("Global: Initial Auth Token provided:", initialAuthToken !== null); // Debugging
+
+    // Initialize Firebase services globally once all compat libraries are loaded.
+    // Ensure 'firebase' object is available from the CDN scripts.
+    window.onload = function() {
+        if (typeof firebase !== 'undefined') {
+            try {
+                window.firebaseAppInstance = firebase.initializeApp(firebaseConfig);
+                window.firebaseAuthInstance = firebase.auth();
+                window.firebaseDbInstance = firebase.firestore();
+                console.log("Global: Firebase services initialized successfully.");
+            } catch (e) {
+                console.error("Global: Error initializing Firebase services:", e);
+                // The JS logic in the body will pick up this error and display it
+            }
+        } else {
+            console.error("Global: 'firebase' object not found. Firebase SDKs might not have loaded correctly.");
+        }
+    };
+  </script>
+
+</head>
+<body>
+  <div id="loading-overlay" class="loading-container">
+    <p>Loading application and authenticating...</p>
+    <div id="firebase-error-display" class="error-message" style="display: none;"></div>
+  </div>
+
+  <div id="app-container" style="display: none;" class="container">
+    <h2 class="card">Voice-Based Mark Entry with Dynamic Subjects</h2>
+
+    <div class="button-group">
+      <button id="startVoiceInput" class="card blue">Start Voice Input</button>
+      <button id="stopVoiceInput" class="card red">Stop Voice Input</button>
+      <button id="nextStudent" class="card green">Next Student</button>
+      <button id="addColumn" class="card yellow">Add New Subject</button> <!-- New button for adding columns -->
+      <button id="deleteSelectedCellBtn" class="card red" disabled>Delete Selected Mark</button>
+      <button id="deleteSelectedColumnBtn" class="card red" disabled>Delete Selected Subject</button>
+      <button id="exportToExcel" class="card purple">Export to Excel</button>
+    </div>
+
+    <div id="output" class="card">Ready.</div>
+    <div id="authenticatedUserId" class="user-id"></div>
+
+    <div class="card" style="width: 100%; overflow-x: auto;">
+      <table id="marksTable">
+        <thead>
+          <tr id="mainHeaderRow">
+            <th rowspan="2">Roll No</th>
+            <th colspan="5" id="subjectHeaderColspan">Subject Marks</th> <!-- colspan will be dynamic -->
+            <th rowspan="2">Total</th>
+          </tr>
+          <tr id="questionHeader">
+            <!-- Subject headers will be dynamically inserted here by JavaScript -->
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <!-- Data rows will be inserted here by JavaScript -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Custom Confirmation Dialog HTML -->
+  <div id="confirmationDialog" class="modal-overlay hidden">
+    <div class="modal-content">
+      <h3 id="confirmationTitle" class="text-xl font-bold mb-4 text-gray-800">Confirm Action</h3>
+      <p id="confirmationMessage" class="mb-2 text-gray-700"></p>
+      <input type="text" id="confirmSubjectNameInput" class="w-full p-2 border border-gray-300 rounded-md mb-4 text-gray-800" />
+      <div class="flex justify-around">
+        <button id="confirmYesBtn" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-md">Yes</button>
+        <button id="confirmNoBtn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-md">No</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Global Firebase variables (initialized in head script, ensure compat versions are used)
+    let app, auth, db; // These will be assigned from window.firebaseAppInstance, etc.
+    let authenticatedUserId = null;
+    let isAuthReady = false;
+    let isLoading = true;
+    let firebaseError = null;
+
+    // UI elements
+    const loadingOverlay = document.getElementById('loading-overlay');
+    const appContainer = document.getElementById('app-container');
+    const firebaseErrorDisplay = document.getElementById('firebase-error-display');
+    const outputDisplay = document.getElementById('output');
+    const userIdDisplay = document.getElementById('authenticatedUserId');
+    const tableBody = document.getElementById('tableBody');
+    const mainHeaderRow = document.getElementById('mainHeaderRow');
+    const questionHeader = document.getElementById('questionHeader');
+    const subjectHeaderColspan = document.getElementById('subjectHeaderColspan');
+    const startVoiceBtn = document.getElementById('startVoiceInput');
+    const stopVoiceBtn = document.getElementById('stopVoiceInput');
+    const nextStudentBtn = document.getElementById('nextStudent');
+    const addColumnBtn = document.getElementById('addColumn'); // Get the new button
+    const deleteSelectedCellBtn = document.getElementById('deleteSelectedCellBtn');
+    const deleteSelectedColumnBtn = document.getElementById('deleteSelectedColumnBtn');
+    const exportExcelBtn = document.getElementById('exportToExcel');
+
+    // Modal elements
+    const confirmationDialog = document.getElementById('confirmationDialog');
+    const confirmationTitle = document.getElementById('confirmationTitle');
+    const confirmationMessage = document.getElementById('confirmationMessage');
+    const confirmSubjectNameInput = document.getElementById('confirmSubjectNameInput');
+    const confirmYesBtn = document.getElementById('confirmYesBtn');
+    const confirmNoBtn = document.getElementById('confirmNoBtn');
+
+    // Application state
+    let students = []; // This array will only hold COMPLETE students for export and filtered views.
+    let allMarksData = []; // Holds ALL students fetched from Firestore (complete and incomplete) for display and internal logic.
+    let nextAvailableRollNumber = 1; // Will be updated by onSnapshot.
+    let currentStudentId = null; // The ID of the student currently being edited/filled
+    let currentCellIndex = 0; // The index of the next subject mark to fill for currentStudent
+    let isListening = false;
+    let selectedCell = null; // { studentId, cellIndex } for mark editing
+    let selectedSubjectHeader = null; // { subjectIndex } for subject editing
+    let activeSubjectHeaderElement = null; // Stores the actual TH element being edited
+    let originalSubjectName = ""; // Stores the original name before editing
+    let currentActionCallback = null; // Stores the callback function for generic confirmation dialog
+
+    // Define initial default subject names and their count
+    let subjectNames = ["Subject 1", "Subject 2", "Subject 3", "Subject 4", "Subject 5"];
+    let numberOfSubjects = subjectNames.length; // Max cells is now dynamic based on subjectNames
+
+    // Speech Recognition
+    let recognition = null;
+
+    // --- Helper Functions ---
+
+    function updateLoadingState(loading, error = null) {
+      isLoading = loading;
+      firebaseError = error;
+
+      if (isLoading) {
+        loadingOverlay.style.display = 'flex';
+        appContainer.style.display = 'none';
+        if (firebaseError) {
+          firebaseErrorDisplay.textContent = `Error: ${firebaseError}. Please ensure your Firebase configuration and permissions are correct.`;
+          firebaseErrorDisplay.style.display = 'block';
+        } else {
+          firebaseErrorDisplay.style.display = 'none';
+        }
+      } else {
+        loadingOverlay.style.display = 'none';
+        appContainer.style.display = 'flex';
+      }
+    }
+
+    function setOutputMessage(message) {
+      outputDisplay.textContent = message;
+    }
+
+    function updateAuthenticatedUserIdDisplay() {
+        userIdDisplay.textContent = authenticatedUserId ? `Authenticated User ID: ${authenticatedUserId}` : 'Not authenticated.';
+    }
+
+    // Helper to convert number words to digits
+    const numberWordsToDigits = {
+        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+        'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15,
+        'sixteen': 16, seventeen: 17, 'eighteen': 18, 'nineteen': 19,
+        'twenty': 20, 'thirty': 30, 'forty': 40, 'fifty': 50,
+        'sixty': 60, 'seventy': 70, 'eighty': 80, 'ninety': 90, 'hundred': 100
+    };
+
+    // UPDATED: Function to extract number from text - improved to handle digits directly
+    const extractNumber = (text) => {
+        const cleaned = text.trim().toLowerCase();
+
+        // 1. Try to directly parse if it's a numeric string (e.g., "41", "85")
+        const directNum = parseInt(cleaned);
+        if (!isNaN(directNum) && directNum >= 0 && directNum <= 100) { // Assuming marks are 0-100
+            return directNum;
+        }
+
+        // 2. Convert common number words (e.g., "forty one" -> 41)
+        const words = cleaned.split(/[\s-]+/); // Split by space or hyphen
+        let currentCombinedNum = 0; // For combining "forty one"
+        
+        // This loop should only execute if `cleaned` is expected to be a number *word* or combination.
+        // It's safer to check if the overall `cleaned` string matches a number word,
+        // or if it consists purely of number words.
+        let isPureNumberWordString = true;
+        for (const word of words) {
+            if (numberWordsToDigits[word] === undefined) {
+                isPureNumberWordString = false;
+                break;
+            }
+        }
+
+        if (isPureNumberWordString) {
+            for (const word of words) {
+                const num = numberWordsToDigits[word];
+                if (num !== undefined) {
+                    if (num === 100) {
+                        currentCombinedNum = (currentCombinedNum === 0 ? 1 : currentCombinedNum) * 100;
+                    } else if (num >= 20 && num < 100) {
+                        currentCombinedNum = (currentCombinedNum % 10 === 0) ? currentCombinedNum + num : num; 
+                    } else if (num >= 0 && num < 20) {
+                        currentCombinedNum += num;
+                    }
+                }
+            }
+        }
+        
+        if (!isNaN(currentCombinedNum) && currentCombinedNum >= 0 && currentCombinedNum <= 100 && currentCombinedNum > 0) { // Add currentCombinedNum > 0 check to prevent misinterpretation of non-number words as 0
+            return currentCombinedNum;
+        }
+        
+        // Fallback for isolated words or simple direct numbers not caught by parseInt or combination
+        const singleWordNum = numberWordsToDigits[cleaned];
+        if (singleWordNum !== undefined && singleWordNum >= 0 && singleWordNum <= 100) {
+            return singleWordNum;
+        }
+
+        // 3. Fallback: If still not a number, return null
+        return null;
+    };
+
+    // Function to calculate total marks for all subjects
+    const calculateTotal = (marks) => {
+      let total = 0;
+      // Use numberOfSubjects, not maxCells directly
+      for (let i = 0; i < numberOfSubjects; i++) {
+        const val = parseInt(marks[i]);
+        if (!isNaN(val)) total += val;
+      }
+      return total;
+    };
+
+    // --- Firebase Operations ---
+
+    async function initFirebaseAndAuth() {
+      // Access global Firebase instances set up in the <head>
+      app = window.firebaseAppInstance;
+      auth = window.firebaseAuthInstance;
+      db = window.firebaseDbInstance;
+
+      console.log("initFirebaseAndAuth: Attempting to initialize.");
+
+      if (!app || !auth || !db) {
+          updateLoadingState(false, "Firebase instances not available. Check browser console for global initialization errors.");
+          console.error("initFirebaseAndAuth: Firebase app, auth, or db not initialized.");
+          return;
+      }
+
+      try {
+        console.log("initFirebaseAndAuth: Firebase services accessed successfully.");
+
+        auth.onAuthStateChanged(async (user) => {
+          console.log("onAuthStateChanged: Authentication state changed.");
+          if (user) {
+            authenticatedUserId = user.uid;
+            console.log("onAuthStateChanged: Authenticated as:", user.uid);
+          } else {
+            authenticatedUserId = null;
+            console.log("onAuthStateChanged: No user authenticated.");
+          }
+          isAuthReady = true;
+          updateAuthenticatedUserIdDisplay(); // Update UI with user ID
+          if (isAuthReady) {
+            console.log("onAuthStateChanged: Auth ready. Loading app settings and marks...");
+            await loadAppSettingsFromFirestore(); // Load app settings (subject names) first
+            await loadMarksFromFirestore(); // Then load student marks
+            updateLoadingState(false); // Hide loading after all data is loaded
+          }
+        });
+
+        console.log("initFirebaseAndAuth: Attempting signInWithCustomToken or signInAnonymously.");
+        if (initialAuthToken) {
+          await auth.signInWithCustomToken(initialAuthToken);
+          console.log("initFirebaseAndAuth: Signed in with custom token.");
+        } else {
+          await auth.signInAnonymously();
+          console.log("initFirebaseAndAuth: Signed in anonymously.");
+        }
+
+      } catch (error) {
+        console.error("initFirebaseAndAuth: Firebase initialization or authentication error:", error);
+        updateLoadingState(false, error.message);
+      }
+    }
+
+    async function loadAppSettingsFromFirestore() {
+      console.log("loadAppSettingsFromFirestore: Attempting to load app settings.");
+      if (!isAuthReady || !authenticatedUserId || !db) {
+        console.log("loadAppSettingsFromFirestore: Skipping Firestore load: Auth not ready or DB not available. Auth ID:", authenticatedUserId, "DB:", db);
+        return;
+      }
+
+      const appSettingsRef = db.collection(`artifacts/${appId}/public/data/appSettings`).doc('globalConfig');
+      console.log("loadAppSettingsFromFirestore: App settings ref path:", appSettingsRef.path);
+
+      appSettingsRef.onSnapshot((docSnapshot) => {
+        console.log("loadAppSettingsFromFirestore: Firestore appSettings onSnapshot fired.");
+        if (docSnapshot.exists) {
+          const data = docSnapshot.data();
+          console.log("loadAppSettingsFromFirestore: Fetched data:", data);
+          if (data.subjectNames && Array.isArray(data.subjectNames) && data.subjectNames.length > 0) {
+            subjectNames = data.subjectNames;
+            numberOfSubjects = subjectNames.length;
+            console.log("loadAppSettingsFromFirestore: Loaded subject names from Firestore:", subjectNames);
+            console.log("loadAppSettingsFromFirestore: Updated numberOfSubjects:", numberOfSubjects);
+          } else {
+            console.warn("loadAppSettingsFromFirestore: Firestore app settings document exists but subjectNames are invalid or empty. Using default.");
+            subjectNames = ["Subject 1", "Subject 2", "Subject 3", "Subject 4", "Subject 5"];
+            numberOfSubjects = subjectNames.length;
+            console.log("loadAppSettingsFromFirestore: Using default subject names:", subjectNames);
+            saveAppSettingsToFirestore(); // Ensure defaults are saved if doc was invalid
+          }
+        } else {
+          console.log("loadAppSettingsFromFirestore: App settings document not found. Using default subject names and creating document.");
+          subjectNames = ["Subject 1", "Subject 2", "Subject 3", "Subject 4", "Subject 5"];
+          numberOfSubjects = subjectNames.length;
+          console.log("loadAppSettingsFromFirestore: Using default subject names:", subjectNames);
+          saveAppSettingsToFirestore(); // Create the document with default values
+        }
+        renderTable(); // Always render table after app settings are processed
+        console.log("loadAppSettingsFromFirestore: renderTable() called after app settings update.");
+      }, (error) => {
+        console.error("loadAppSettingsFromFirestore: Error fetching app settings:", error);
+        setOutputMessage("Error loading app settings: " + error.message);
+      });
+    }
+
+    async function saveAppSettingsToFirestore() {
+      console.log("saveAppSettingsToFirestore: Attempting to save app settings.");
+      if (!authenticatedUserId || !db) {
+        setOutputMessage("Authentication not ready or DB not available. Cannot save.");
+        console.warn("saveAppSettingsToFirestore: Firebase not ready. Auth ID:", authenticatedUserId, "DB:", db);
+        return;
+      }
+      const appSettingsRef = db.collection(`artifacts/${appId}/public/data/appSettings`).doc('globalConfig');
+      try {
+        console.log("saveAppSettingsToFirestore: Attempting to save subject names to Firestore:", JSON.stringify(subjectNames));
+        await appSettingsRef.set({ subjectNames: subjectNames });
+        console.log("saveAppSettingsToFirestore: Subject names saved to Firestore successfully.");
+      } catch (error) {
+        console.error("saveAppSettingsToFirestore: Error saving app settings:", error);
+        setOutputMessage("Error saving subject names: " + error.message);
+      }
+    }
+
+    async function loadMarksFromFirestore() {
+      console.log("loadMarksFromFirestore: Attempting to load marks.");
+      if (!isAuthReady || !authenticatedUserId || !db) {
+        console.log("loadMarksFromFirestore: Skipping Firestore load: Auth not ready or DB not available. Auth ID:", authenticatedUserId, "DB:", db);
+        return;
+      }
+
+      const marksCollectionRef = db.collection(`artifacts/${appId}/public/data/marks`);
+      const q = marksCollectionRef.orderBy('timestamp', 'asc');
+      console.log("loadMarksFromFirestore: Marks collection ref path:", marksCollectionRef.path);
+
+      q.onSnapshot((snapshot) => {
+        console.log("loadMarksFromFirestore: Firestore marks onSnapshot fired.");
+        allMarksData = []; // Reset allMarksData on each snapshot update
+        let maxRollInDb = 0; // Local variable for this snapshot's max roll
+        let foundDocs = 0;
+
+        snapshot.forEach((doc) => {
+          foundDocs++;
+          const data = doc.data();
+          allMarksData.push({ id: doc.id, ...data });
+          const rollNumMatch = data.rollNo.match(/23mss(\d+)/);
+          if (rollNumMatch) {
+            maxRollInDb = Math.max(maxRollInDb, parseInt(rollNumMatch[1]));
+          }
+        });
+        console.log(`loadMarksFromFirestore: Found ${foundDocs} student documents.`);
+
+        // Update nextAvailableRollNumber based on the highest from the database.
+        nextAvailableRollNumber = maxRollInDb + 1; 
+        console.log("loadMarksFromFirestore: nextAvailableRollNumber updated to:", nextAvailableRollNumber);
+
+        // Filter for complete students for export only (students array is for export)
+        students = allMarksData.filter(s => 
+          s.marks && s.marks.length === numberOfSubjects && s.marks.every(mark => mark !== null && mark !== undefined)
+        );
+        console.log("loadMarksFromFirestore: Filtered complete students for export:", students.length);
+
+        // Set the active student and cell index based on the LAST student in allMarksData
+        // This ensures continuity if user refreshes mid-entry.
+        if (allMarksData.length > 0) {
+            const lastActiveStudent = allMarksData[allMarksData.length - 1];
+            currentStudentId = lastActiveStudent.id;
+            // Filter out null/undefined marks to determine current progress
+            currentCellIndex = lastActiveStudent.marks ? lastActiveStudent.marks.filter(m => m !== null && m !== undefined).length : 0;
+            setOutputMessage(`Ready to continue for ${lastActiveStudent.rollNo}.`);
+            console.log(`loadMarksFromFirestore: Current student set to ${lastActiveStudent.rollNo}, currentCellIndex: ${currentCellIndex}`);
+        } else {
+            // Database is empty, no current student selected.
+            currentStudentId = null;
+            currentCellIndex = 0;
+            setOutputMessage("Welcome! Click 'Start Voice Input' to add the first student and begin mark entry. You can also say 'Change subject [number] to [new name]' to edit subjects.");
+            console.log("loadMarksFromFirestore: No students found in DB. Resetting current student state.");
+        }
+        
+        renderTable(); // Always render the table with all (complete and incomplete) data
+        console.log("loadMarksFromFirestore: renderTable() called after marks update.");
+        
+      }, (error) => {
+        console.error("loadMarksFromFirestore: Error fetching marks:", error);
+        setOutputMessage("Error loading data: " + error.message);
+        updateLoadingState(false, error.message);
+      });
+    }
+
+    async function createNewStudent() {
+      console.log("createNewStudent: Attempting to create new student.");
+      if (!authenticatedUserId || !db) {
+        setOutputMessage("Authentication not ready or DB not available. Please wait.");
+        console.warn("createNewStudent: Firebase not ready. Auth ID:", authenticatedUserId, "DB:", db);
+        return;
+      }
+
+      // Check if the current student (if any) is incomplete and delete if so
+      if (currentStudentId) {
+        const existingCurrentStudent = allMarksData.find(s => s.id === currentStudentId);
+        // An incomplete student is one whose marks array is not full or contains null/undefined
+        if (existingCurrentStudent && (existingCurrentStudent.marks.length < numberOfSubjects || existingCurrentStudent.marks.some(mark => mark === null || mark === undefined))) {
+          try {
+            console.log(`createNewStudent: Deleting incomplete student: ${existingCurrentStudent.rollNo}`);
+            await db.collection(`artifacts/${appId}/public/data/marks`).doc(currentStudentId).delete();
+            console.log(`createNewStudent: Deleted incomplete student: ${existingCurrentStudent.rollNo}`);
+            setOutputMessage(`Incomplete student ${existingCurrentStudent.rollNo} removed. Creating new...`);
+          } catch (error) {
+            console.error("createNewStudent: Error deleting incomplete student:", error);
+            setOutputMessage("Error cleaning up old student. Creating new one.");
+          }
+        }
+      }
+
+      clearSelectedCell(); // Clear any cell selection
+      clearSelectedSubjectHeader(); // Clear any subject header selection
+      
+      // Dynamically calculate the next roll number based on current allMarksData
+      let highestExistingRollNum = 0;
+      if (allMarksData.length > 0) {
+          highestExistingRollNum = Math.max(...allMarksData.map(s => {
+              const match = s.rollNo.match(/23mss(\d+)/);
+              return match ? parseInt(match[1]) : 0;
+          }));
+      }
+      const nextRollToUse = highestExistingRollNum + 1;
+
+      const newRollNo = `23mss${String(nextRollToUse).padStart(3, '0')}`;
+      const newStudent = {
+        rollNo: newRollNo,
+        marks: Array(numberOfSubjects).fill(null), // Initialize marks array based on current number of subjects
+        total: 0,
+        timestamp: Date.now()
+      };
+
+      try {
+        console.log(`createNewStudent: Attempting to add new student: ${newRollNo} to Firestore.`);
+        const docRef = await db.collection(`artifacts/${appId}/public/data/marks`).add(newStudent);
+        currentStudentId = docRef.id; // Set the ID of the newly created student as the current one
+        currentCellIndex = 0; // Reset cell index for the new student
+        setOutputMessage(`New student ${newRollNo} added. Ready to enter marks.`);
+        console.log(`createNewStudent: Successfully added document with ID: ${docRef.id}`);
+
+        // Manually update allMarksData immediately with the new student for display
+        const addedStudentData = { id: docRef.id, ...newStudent };
+        allMarksData.push(addedStudentData);
+        renderTable(); // Re-render table, now showing the newly added student (even if incomplete)
+      } catch (error) {
+        console.error("createNewStudent: Error adding document: ", error);
+        setOutputMessage("Error creating new student: " + error.message);
+      }
+    }
+
+    async function updateStudentMarksInFirestore(studentId, newMarks) {
+      console.log(`updateStudentMarksInFirestore: Updating marks for student ${studentId}.`);
+      if (!authenticatedUserId || !db) {
+        setOutputMessage("Authentication not ready or DB not available. Cannot update.");
+        console.warn("updateStudentMarksInFirestore: Firebase not ready. Auth ID:", authenticatedUserId, "DB:", db);
+        return;
+      }
+      const studentRef = db.collection(`artifacts/${appId}/public/data/marks`).doc(studentId);
+      const newTotal = calculateTotal(newMarks);
+
+      try {
+        console.log(`updateStudentMarksInFirestore: Attempting to update marks for ${studentId}:`, JSON.stringify(newMarks), "Total:", newTotal);
+        await studentRef.update({
+          marks: newMarks,
+          total: newTotal
+        });
+        console.log(`updateStudentMarksInFirestore: Marks updated successfully for ${studentId}.`);
+        // UI will update automatically via onSnapshot listener.
+      } catch (error) {
+        console.error("updateStudentMarksInFirestore: Error updating document: ", error);
+        setOutputMessage("Error updating marks: " + error.message);
+      }
+    }
+
+    // --- UI Rendering ---
+
+    function renderTable() {
+      console.log("renderTable: Rendering table with current subjectNames:", subjectNames, "and numberOfSubjects:", numberOfSubjects);
+      // Update the main header colspan
+      subjectHeaderColspan.setAttribute('colspan', numberOfSubjects);
+      subjectHeaderColspan.textContent = `Subject Marks (${numberOfSubjects} Subjects)`;
+
+      // Render subject headers dynamically
+      questionHeader.innerHTML = ''; // Clear existing subject headers
+      subjectNames.forEach((subjectName, index) => {
+        const th = document.createElement('th');
+        th.textContent = subjectName;
+        th.contentEditable = "true"; // Make subject header editable
+        th.dataset.subjectIndex = index; // Store index for editing
+
+        // Add event listener for subject header editing
+        th.addEventListener('blur', handleSubjectHeaderBlur);
+        // Added keydown event listener to save on Enter
+        th.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault(); // Prevent new line on Enter
+                th.blur(); // Trigger blur to save
+            }
+        });
+        th.addEventListener('click', (event) => {
+            handleSubjectHeaderClick(event);
+            originalSubjectName = event.target.textContent; // Store original name when focus is gained
+        }); 
+
+        // Apply selected class if this subject header is currently selected
+        if (selectedSubjectHeader !== null && selectedSubjectHeader.subjectIndex === index) {
+            th.classList.add('selected');
+        }
+
+        questionHeader.appendChild(th);
+      });
+
+      tableBody.innerHTML = ''; // Clear existing rows
+      // Render ALL students (complete and incomplete) from allMarksData
+      allMarksData.forEach(student => { 
+        const row = tableBody.insertRow();
+        row.dataset.studentId = student.id; // Store student ID on the row
+        // Highlight active student row
+        if (student.id === currentStudentId) {
+            row.classList.add('active-student-row');
+        }
+
+        const rollNoCell = row.insertCell();
+        rollNoCell.textContent = student.rollNo;
+
+        // Ensure student.marks array has the correct length, padding with null if needed
+        let studentMarks = student.marks || [];
+        while (studentMarks.length < numberOfSubjects) {
+          studentMarks.push(null);
+        }
+        // If a column was removed (e.g., if numberOfSubjects decreased, which isn't currently supported but good for robustness), truncate the marks array
+        studentMarks = studentMarks.slice(0, numberOfSubjects);
+
+        // Render subject marks
+        for (let i = 0; i < numberOfSubjects; i++) {
+          const markCell = row.insertCell();
+          markCell.textContent = studentMarks[i] !== null ? studentMarks[i] : '';
+          markCell.dataset.cellIndex = i + 1; // 1-based index for display/selection
+          markCell.dataset.studentId = student.id; // Store student ID on the cell
+
+          // Add click listener for selecting cells
+          markCell.addEventListener('click', handleCellClick);
+
+          // Apply selected class if this cell is currently selected or is the next input cell for the active student
+          if (selectedCell && selectedCell.studentId === student.id && selectedCell.cellIndex === i + 1) {
+            markCell.classList.add('selected');
+          } else if (student.id === currentStudentId && i === currentCellIndex && currentCellIndex < numberOfSubjects) {
+             markCell.classList.add('next-input-cell'); // Highlight the next cell for input
+          }
+        }
+
+        const totalCell = row.insertCell();
+        totalCell.textContent = calculateTotal(studentMarks); // Recalculate total based on current marks
+        totalCell.classList.add('font-bold');
+      });
+      console.log("renderTable: Table rendering complete.");
+    }
+
+    function clearSelectedCell() {
+      console.log("clearSelectedCell: Clearing selected cell.");
+      // Remove 'selected' class from previously selected cell
+      if (selectedCell) {
+        const prevSelectedCellElement = document.querySelector(`[data-student-id="${selectedCell.studentId}"][data-cell-index="${selectedCell.cellIndex}"]`);
+        if (prevSelectedCellElement) {
+          prevSelectedCellElement.classList.remove('selected');
+        }
+      }
+      selectedCell = null;
+      deleteSelectedCellBtn.disabled = true; // Disable delete button
+      renderTable(); // Re-render to clear highlights
+    }
+
+    function clearSelectedSubjectHeader() {
+      console.log("clearSelectedSubjectHeader: Clearing selected subject header.");
+      if (selectedSubjectHeader !== null) {
+        const prevSelectedHeaderElement = document.querySelector(`th[data-subject-index="${selectedSubjectHeader.subjectIndex}"]`);
+        if (prevSelectedHeaderElement) {
+          prevSelectedHeaderElement.classList.remove('selected');
+        }
+      }
+      selectedSubjectHeader = null;
+      deleteSelectedColumnBtn.disabled = true; // Disable delete button
+      renderTable(); // Re-render to clear highlights
+    }
+
+    function handleCellClick(event) {
+      console.log("handleCellClick: Cell clicked.");
+      clearSelectedCell(); // Clear previous cell selection
+      clearSelectedSubjectHeader(); // Clear any subject header selection
+      const studentId = event.target.dataset.studentId;
+      const cellIndex = parseInt(event.target.dataset.cellIndex); // 1-based
+
+      selectedCell = { studentId, cellIndex };
+      currentStudentId = studentId; // Set current student to the one whose cell was clicked
+      // Find the selected student in allMarksData to get its full state
+      const selectedStudent = allMarksData.find(s => s.id === studentId);
+      if (selectedStudent) {
+          currentCellIndex = selectedStudent.marks ? selectedStudent.marks.filter(m => m !== null && m !== undefined).length : 0;
+      } else {
+          currentCellIndex = 0; // Fallback
+      }
+
+      event.target.classList.add('selected');
+      deleteSelectedCellBtn.disabled = false; // Enable delete cell button
+      setOutputMessage(`Selected cell for editing (Subject ${cellIndex}) for ${allMarksData.find(s => s.id === studentId)?.rollNo}`);
+      console.log(`handleCellClick: Selected cell: Student ID ${studentId}, Cell Index ${cellIndex}`);
+      renderTable(); // Re-render to apply new highlights
+    }
+
+    function handleSubjectHeaderClick(event) {
+        console.log("handleSubjectHeaderClick: Subject header clicked.");
+        clearSelectedCell(); // Clear any cell selection
+        clearSelectedSubjectHeader(); // Clear previous subject header selection
+        const subjectIndex = parseInt(event.target.dataset.subjectIndex);
+        selectedSubjectHeader = { subjectIndex };
+        event.target.classList.add('selected');
+        deleteSelectedColumnBtn.disabled = false; // Enable delete subject button
+        // Store original name when focus is gained (on click, before editing)
+        originalSubjectName = event.target.textContent; 
+        setOutputMessage(`Selected subject header: ${event.target.textContent}`);
+        console.log(`handleSubjectHeaderClick: Selected subject header: Index ${subjectIndex}. Original Name: ${originalSubjectName}`);
+        renderTable(); // Re-render to apply new highlights
+    }
+
+    async function handleSubjectHeaderBlur(event) {
+        console.log("handleSubjectHeaderBlur: Subject header blur event.");
+        const thElement = event.target;
+        const subjectIndex = parseInt(thElement.dataset.subjectIndex);
+        const newSubjectName = thElement.textContent.trim();
+        const oldSubjectName = originalSubjectName; // Retrieve original name from when focused
+
+        if (newSubjectName === '') {
+            console.warn("handleSubjectHeaderBlur: Subject name cannot be empty. Reverting.");
+            thElement.textContent = oldSubjectName || `Subject ${subjectIndex + 1}`;
+            setOutputMessage("Subject name cannot be empty. Reverted.");
+            clearSelectedSubjectHeader();
+            return;
+        }
+
+        // Check for duplicate names (case-insensitive, exclude the current subject being edited)
+        const isDuplicate = subjectNames.some((name, idx) => 
+            idx !== subjectIndex && name.toLowerCase() === newSubjectName.toLowerCase()
+        );
+
+        if (isDuplicate) {
+            console.warn(`handleSubjectHeaderBlur: Duplicate subject name detected: "${newSubjectName}". Reverting.`);
+            thElement.textContent = oldSubjectName; // Revert content
+            setOutputMessage(`Subject name "${newSubjectName}" already exists. Reverted.`);
+            clearSelectedSubjectHeader();
+            return;
+        }
+
+
+        if (oldSubjectName !== newSubjectName) {
+            // Show confirmation dialog for subject name change
+            showGenericConfirmationDialog(
+                "Confirm Subject Name Change",
+                `Do you want to change the subject name from "${oldSubjectName}" to:`,
+                true, // Show input field
+                newSubjectName, // Initial value for input
+                async () => { // On Confirm Callback
+                    const confirmedNewSubjectName = confirmSubjectNameInput.value.trim();
+                    if (confirmedNewSubjectName === '') {
+                        setOutputMessage("Subject name cannot be empty. Please provide a name or click 'No' to revert.");
+                        return;
+                    }
+                    
+                    // Re-check for duplicate after user confirms in dialog (in case they edited to another existing name)
+                    const isConfirmedDuplicate = subjectNames.some((name, idx) => 
+                        idx !== subjectIndex && name.toLowerCase() === confirmedNewSubjectName.toLowerCase()
+                    );
+
+                    if (isConfirmedDuplicate) {
+                        setOutputMessage(`Subject name "${confirmedNewSubjectName}" already exists. Please choose a different name.`);
+                        return; // Keep dialog open
+                    }
+
+                    subjectNames[subjectIndex] = confirmedNewSubjectName;
+                    await saveAppSettingsToFirestore();
+                    setOutputMessage(`Subject ${subjectIndex + 1} name updated to: ${confirmedNewSubjectName}`);
+                    hideGenericConfirmationDialog();
+                },
+                () => { // On Cancel Callback
+                    if (activeSubjectHeaderElement) {
+                        activeSubjectHeaderElement.textContent = oldSubjectName; // Revert content
+                    }
+                    setOutputMessage(`Subject name change cancelled. Reverted to: ${oldSubjectName}`);
+                    hideGenericConfirmationDialog();
+                }
+            );
+        } else {
+            console.log("handleSubjectHeaderBlur: Subject name not changed (same as previous).");
+            clearSelectedSubjectHeader(); // Clear selection if no change
+        }
+    }
+
+    // --- Generic Confirmation Dialog Functions ---
+    function showGenericConfirmationDialog(title, message, showInput, inputValue, onConfirmCallback, onCancelCallback) {
+        console.log("showGenericConfirmationDialog: Displaying generic confirmation dialog.");
+        confirmationDialog.classList.remove('hidden');
+        confirmationTitle.textContent = title;
+        confirmationMessage.textContent = message;
+
+        if (showInput) {
+            confirmSubjectNameInput.style.display = 'block';
+            confirmSubjectNameInput.value = inputValue;
+            confirmSubjectNameInput.focus(); // Focus the input for direct editing
+            // Select all text in the input field for easy overwriting
+            confirmSubjectNameInput.setSelectionRange(0, confirmSubjectNameInput.value.length); 
+        } else {
+            confirmSubjectNameInput.style.display = 'none';
+            confirmSubjectNameInput.value = ''; // Clear value
+        }
+
+        currentActionCallback = onConfirmCallback; // Store the "Yes" action
+        confirmNoBtn.onclick = onCancelCallback; // Store the "No" action directly
+
+        // Prevent accidental clicks on the background when modal is open
+        confirmationDialog.onclick = (e) => {
+            if (e.target === confirmationDialog) {
+                // If clicked outside the modal content, treat as cancel
+                if (confirmNoBtn.onclick) confirmNoBtn.onclick();
+            }
+        };
+    }
+
+    function hideGenericConfirmationDialog() {
+        console.log("hideGenericConfirmationDialog: Hiding generic confirmation dialog.");
+        confirmationDialog.classList.add('hidden');
+        confirmationTitle.textContent = "Confirm Action"; // Reset title
+        confirmationMessage.textContent = ""; // Clear message
+        confirmSubjectNameInput.value = ""; // Clear input
+        confirmSubjectNameInput.style.display = 'block'; // Reset display for next use
+        currentActionCallback = null; // Clear the stored callback
+        confirmNoBtn.onclick = null; // Clear the 'No' click handler
+        confirmationDialog.onclick = null; // Remove background click listener
+        clearSelectedCell();
+        clearSelectedSubjectHeader();
+    }
+
+    // Update Confirm Yes/No buttons to use the generic callback
+    confirmYesBtn.addEventListener('click', async () => {
+        if (currentActionCallback) {
+            await currentActionCallback();
+        } else {
+            hideGenericConfirmationDialog(); // Fallback
+        }
+    });
+
+    confirmNoBtn.addEventListener('click', () => {
+        // This button's click handler is now assigned dynamically by showGenericConfirmationDialog
+        // so no need for this specific event listener here. It's handled by `confirmNoBtn.onclick = onCancelCallback;`
+    });
+
+    // --- Delete Functionality ---
+    async function deleteSelectedMark() {
+        console.log("deleteSelectedMark: Attempting to delete selected mark.");
+        if (!selectedCell) {
+            setOutputMessage("No mark cell selected to delete.");
+            return;
+        }
+
+        const studentId = selectedCell.studentId;
+        const cellIndex = selectedCell.cellIndex; // 1-based
+
+        showGenericConfirmationDialog(
+            "Confirm Mark Deletion",
+            `Are you sure you want to delete the mark for Subject ${cellIndex} for this student?`,
+            false, // Do not show input field
+            '', // No input value needed
+            async () => { // On Confirm Callback
+                const studentToUpdate = allMarksData.find(s => s.id === studentId);
+                if (studentToUpdate) {
+                    let newMarks = [...studentToUpdate.marks];
+                    if (newMarks.length >= cellIndex) { // Ensure index is valid
+                        newMarks[cellIndex - 1] = null; // Set mark to null (empty)
+                        await updateStudentMarksInFirestore(studentId, newMarks);
+                        setOutputMessage(`Mark for Subject ${cellIndex} deleted.`);
+                    } else {
+                        console.error("deleteSelectedMark: Mark index out of bounds for deletion.");
+                        setOutputMessage("Error deleting mark: Invalid subject index.");
+                    }
+                } else {
+                    console.error("deleteSelectedMark: Student not found for mark deletion.");
+                    setOutputMessage("Error deleting mark: Student not found.");
+                }
+                hideGenericConfirmationDialog();
+            },
+            () => { // On Cancel Callback
+                setOutputMessage("Mark deletion cancelled.");
+                hideGenericConfirmationDialog();
+            }
+        );
+    }
+
+    async function deleteSelectedSubject() {
+        console.log("deleteSelectedSubject: Attempting to delete selected subject.");
+        if (!selectedSubjectHeader) {
+            setOutputMessage("No subject header selected to delete.");
+            return;
+        }
+
+        const subjectIndex = selectedSubjectHeader.subjectIndex; // 0-based
+        const subjectName = subjectNames[subjectIndex];
+
+        if (numberOfSubjects <= 1) {
+            setOutputMessage("Cannot delete the last subject. At least one subject must remain.");
+            return;
+        }
+
+        showGenericConfirmationDialog(
+            "Confirm Subject Deletion",
+            `Are you sure you want to delete the subject "${subjectName}"? This will also remove all marks for this subject across all students.`,
+            false, // Do not show input field
+            '', // No input value needed
+            async () => { // On Confirm Callback
+                // Remove subject from the global array
+                subjectNames.splice(subjectIndex, 1);
+                numberOfSubjects = subjectNames.length; // Update count
+                await saveAppSettingsToFirestore(); // Save updated subject names
+
+                // Update all students' marks by removing the corresponding mark
+                const marksCollectionRef = db.collection(`artifacts/${appId}/public/data/marks`);
+                let studentsUpdatedCount = 0;
+                for (const student of allMarksData) {
+                    let updatedMarks = student.marks || [];
+                    // Ensure the array is long enough before splicing
+                    if (updatedMarks.length > subjectIndex) {
+                        updatedMarks.splice(subjectIndex, 1); // Remove the mark at this index
+                    }
+                    // Adjust length to match new numberOfSubjects, padding with null if needed (unlikely after splice, but safe)
+                    while (updatedMarks.length < numberOfSubjects) {
+                        updatedMarks.push(null);
+                    }
+                    updatedMarks = updatedMarks.slice(0, numberOfSubjects); // Ensure correct length
+
+                    const newTotal = calculateTotal(updatedMarks); // Recalculate total
+
+                    try {
+                        await marksCollectionRef.doc(student.id).update({
+                            marks: updatedMarks,
+                            total: newTotal
+                        });
+                        studentsUpdatedCount++;
+                    } catch (error) {
+                        console.error(`deleteSelectedSubject: Error updating marks for student ${student.rollNo} after subject deletion:`, error);
+                    }
+                }
+                setOutputMessage(`Subject "${subjectName}" and its marks deleted. Updated ${studentsUpdatedCount} students.`);
+                hideGenericConfirmationDialog();
+            },
+            () => { // On Cancel Callback
+                setOutputMessage("Subject deletion cancelled.");
+                hideGenericConfirmationDialog();
+            }
+        );
+    }
+
+
+    async function addColumn() {
+        console.log("addColumn: Attempting to add new column.");
+        if (!authenticatedUserId || !db) {
+            setOutputMessage("Authentication not ready or DB not available. Cannot add column.");
+            console.warn("addColumn: Firebase not ready. Auth ID:", authenticatedUserId, "DB:", db);
+            return;
+        }
+
+        // Add a new subject name to the array
+        const newSubjectName = `Subject ${numberOfSubjects + 1}`;
+        subjectNames.push(newSubjectName);
+        numberOfSubjects = subjectNames.length; // Update the count
+        console.log("addColumn: New subject added locally:", newSubjectName);
+        console.log("addColumn: Updated subjectNames array:", JSON.stringify(subjectNames));
+        console.log("addColumn: Updated numberOfSubjects:", numberOfSubjects);
+
+        await saveAppSettingsToFirestore(); // Save updated subject names
+
+        // Update all existing students' marks arrays to accommodate the new column
+        // We do this by fetching all marks, modifying them, and then batch updating (or individual updates)
+        // For simplicity, we'll iterate and update, as batch operations are more complex.
+        const marksCollectionRef = db.collection(`artifacts/${appId}/public/data/marks`);
+        let studentsUpdatedCount = 0;
+        for (const student of allMarksData) {
+            let updatedMarks = student.marks || [];
+            // If the marks array is shorter than the new number of subjects, add nulls
+            while (updatedMarks.length < numberOfSubjects) {
+                updatedMarks.push(null);
+            }
+            // If somehow it's longer (shouldn't happen with this logic), truncate it
+            updatedMarks = updatedMarks.slice(0, numberOfSubjects);
+
+            const newTotal = calculateTotal(updatedMarks); // Recalculate total
+
+            try {
+                await marksCollectionRef.doc(student.id).update({
+                    marks: updatedMarks,
+                    total: newTotal
+                });
+                studentsUpdatedCount++;
+                console.log(`addColumn: Updated marks for student ${student.rollNo}. New marks: ${JSON.stringify(updatedMarks)}`);
+            } catch (error) {
+                console.error(`addColumn: Error updating marks for student ${student.rollNo} after column addition:`, error);
+            }
+        }
+        setOutputMessage(`Added new subject: "${newSubjectName}". All student data updated.`);
+        console.log(`addColumn: Finished updating ${studentsUpdatedCount} students. Firestore update triggered. Table will re-render via onSnapshot.`);
+    }
+
+
+    // --- Voice Input ---
+
+    function setupSpeechRecognition() {
+      console.log("setupSpeechRecognition: Setting up speech recognition.");
+      if (typeof window.SpeechRecognition === 'undefined' && typeof window.webkitSpeechRecognition === 'undefined') {
+        setOutputMessage("Speech Recognition is not supported by your browser.");
+        startVoiceBtn.disabled = true;
+        stopVoiceBtn.disabled = true;
+        console.error("setupSpeechRecognition: SpeechRecognition API not supported.");
+        return;
+      }
+
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRecognition();
+      recognition.lang = "en-US";
+      recognition.continuous = true;
+      recognition.interimResults = false;
+
+      recognition.onresult = async (event) => { // Made onresult async
+        const transcript = event.results[event.results.length - 1][0].transcript.trim().toLowerCase();
+        // Log the raw transcript to see what the API is actually hearing
+        console.log("recognition.onresult: Raw Transcript from Speech API:", transcript);
+
+        // Attempt to parse subject change command first
+        // Updated regex to allow 'to' or 'for' and handle whitespace more flexibly
+        // Added .* to the new subject name capture group to allow any characters including spaces
+        const changeSubjectCommandRegex = /change subject\s+(?:number\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+)\s*(?:to|for)\s*(.*)/;
+        const changeSubjectCommandMatch = transcript.match(changeSubjectCommandRegex);
+
+        if (changeSubjectCommandMatch) {
+            console.log("recognition.onresult: Detected 'change subject' command.");
+            const subjectNumberStr = changeSubjectCommandMatch[1];
+            let subjectIndex = -1;
+
+            // Convert subject number word/digit to 0-based index
+            if (numberWordsToDigits[subjectNumberStr] !== undefined) {
+                subjectIndex = numberWordsToDigits[subjectNumberStr] - 1; 
+                console.log(`recognition.onresult: Parsed subject number word "${subjectNumberStr}" to index ${subjectIndex}.`);
+            } else if (!isNaN(parseInt(subjectNumberStr))) {
+                subjectIndex = parseInt(subjectNumberStr) - 1;
+                console.log(`recognition.onresult: Parsed subject number digit "${subjectNumberStr}" to index ${subjectIndex}.`);
+            } else {
+                console.warn(`recognition.onresult: Could not parse subject number from "${subjectNumberStr}".`);
+                setOutputMessage("Invalid subject number in command. Try 1 to " + numberOfSubjects + ".");
+                return; // Stop processing this command
+            }
+            
+            const newSubjectName = changeSubjectCommandMatch[2].trim();
+            console.log("recognition.onresult: New subject name extracted:", newSubjectName);
+
+            if (subjectIndex >= 0 && subjectIndex < numberOfSubjects && newSubjectName !== '') {
+                // Clear any existing selections (cell or subject header)
+                clearSelectedCell(); 
+                clearSelectedSubjectHeader();
+
+                // Capitalize the first letter of the new subject name for better display
+                const oldSubjectName = subjectNames[subjectIndex];
+                subjectNames[subjectIndex] = newSubjectName.charAt(0).toUpperCase() + newSubjectName.slice(1); 
+                console.log(`recognition.onresult: Updating subjectNames locally. Old: "${oldSubjectName}", New: "${subjectNames[subjectIndex]}"`);
+                
+                try {
+                    await saveAppSettingsToFirestore(); // Save updated subject names to Firestore
+                    setOutputMessage(`Subject ${subjectIndex + 1} updated to: "${subjectNames[subjectIndex]}"`);
+                    console.log("recognition.onresult: Subject name saved to Firestore successfully via voice command.");
+                } catch (saveError) {
+                    console.error("recognition.onresult: Error saving subject name via voice command:", saveError);
+                    setOutputMessage("Error updating subject name: " + saveError.message);
+                }
+
+            } else {
+                setOutputMessage("Invalid subject change command. Try 'change subject [number] to [new name]'.");
+                console.warn("recognition.onresult: Subject change command failed validation. Index:", subjectIndex, "New Name:", newSubjectName);
+            }
+        } else {
+            console.log("recognition.onresult: No 'change subject' command detected. Proceeding with mark entry.");
+            // If not a subject change command, proceed with mark entry logic
+            const mark = extractNumber(transcript);
+            console.log("recognition.onresult: Processed Mark (after extractNumber):", mark);
+
+            if (mark !== null && currentStudentId) {
+            // Find the student in allMarksData (which contains incomplete ones) to update it locally
+            const currentStudentData = allMarksData.find(s => s.id === currentStudentId); 
+            if (!currentStudentData) {
+                console.error("recognition.onresult: Current student data not found for ID:", currentStudentId);
+                setOutputMessage("Error: Current student not found for update.");
+                return;
+            }
+
+            let newMarks = [...currentStudentData.marks]; // Use the marks from allMarksData
+            // Ensure newMarks array has correct length before updating
+            while(newMarks.length < numberOfSubjects) {
+                newMarks.push(null);
+            }
+
+            if (selectedCell && selectedCell.studentId === currentStudentId) {
+                console.log(`recognition.onresult: Updating selected cell (${selectedCell.cellIndex}) with mark ${mark}.`);
+                newMarks[selectedCell.cellIndex - 1] = mark; // Adjust index for 0-based array
+                clearSelectedCell(); // Clear selection after update
+                setOutputMessage(`Updated selected cell: ${mark}`);
+            } else {
+                const targetIndex = currentCellIndex;
+                if (targetIndex < numberOfSubjects) { // Use numberOfSubjects here
+                    console.log(`recognition.onresult: Entering mark ${mark} into current subject index ${targetIndex}.`);
+                    newMarks[targetIndex] = mark;
+                    currentCellIndex++; // Move to next cell for sequential entry
+                    setOutputMessage(`Entered: ${mark}`);
+                } else {
+                    console.warn("recognition.onresult: All subjects filled. Prompting 'Next Student'.");
+                    setOutputMessage("All subjects filled. Click 'Next Student'.");
+                }
+            }
+            updateStudentMarksInFirestore(currentStudentId, newMarks);
+            renderTable(); // Re-render table to update highlights after mark entry
+            } else {
+            setOutputMessage(`Could not recognize a number or valid command: "${transcript}"`);
+            console.log(`recognition.onresult: Did not recognize mark or command. Transcript: "${transcript}", Mark: ${mark}, Current Student ID: ${currentStudentId}`);
+            }
+        }
+      };
+
+      recognition.onerror = (e) => {
+        console.error("recognition.onerror: Speech recognition error:", e);
+        setOutputMessage("Error: " + e.error);
+        setIsListening(false); // Stop listening state on error
+      };
+
+      recognition.onend = () => {
+        console.log("recognition.onend: Still listening, restarting recognition.");
+        if (isListening) {
+          console.log("recognition.onend: Still listening, restarting recognition.");
+          setTimeout(() => {
+            if (recognition) recognition.start();
+          }, 50); // Restart recognition if still listening
+        }
+      };
+    }
+
+    // --- Event Listeners ---
+
+    startVoiceBtn.addEventListener('click', () => {
+      console.log("startVoiceInput: Button clicked.");
+      // Ensure Firebase is ready before attempting any operations
+      if (!isAuthReady || !authenticatedUserId || !db) {
+          setOutputMessage("Application not ready. Please wait for authentication and database initialization.");
+          console.warn("startVoiceInput: Application not ready for voice input.");
+          return;
+      }
+
+      if (!currentStudentId) { // No student currently active
+        console.log("startVoiceInput: No current student. Creating new student.");
+        // If there are no students at all (fresh start on database) or if the last one was removed.
+        // We always create a new student to start inputting.
+        createNewStudent().then(() => {
+            if (!isListening && recognition) {
+                isListening = true;
+                recognition.start();
+                setOutputMessage("Listening for marks. Say 'Change subject [number] to [new name]' to edit subjects.");
+                console.log("startVoiceInput: Recognition started after new student creation.");
+            }
+        }).catch(error => {
+            console.error("startVoiceInput: Failed to create first student:", error);
+            setOutputMessage("Error creating first student: " + error.message);
+        });
+      } else {
+        // Normal case: current student is already active, just start listening
+        if (!isListening && recognition) {
+          isListening = true;
+          recognition.start();
+          setOutputMessage("Listening for marks. Say 'Change subject [number] to [new name]' to edit subjects.");
+          console.log("startVoiceInput: Recognition started for existing student.");
+        }
+      }
+    });
+
+    stopVoiceBtn.addEventListener('click', () => {
+      console.log("stopVoiceInput: Button clicked.");
+      isListening = false;
+      if (recognition) recognition.stop();
+      setOutputMessage("Stopped listening.");
+    });
+
+    nextStudentBtn.addEventListener('click', () => {
+      console.log("nextStudent: Button clicked. Creating new student.");
+      createNewStudent();
+    });
+
+    addColumnBtn.addEventListener('click', addColumn); // Event listener for new column button
+    deleteSelectedCellBtn.addEventListener('click', deleteSelectedMark);
+    deleteSelectedColumnBtn.addEventListener('click', deleteSelectedSubject);
+
+
+    exportExcelBtn.addEventListener('click', () => {
+      console.log("exportToExcel: Button clicked. Attempting to export.");
+      if (typeof window.XLSX === 'undefined') {
+        setOutputMessage("Excel export library (XLSX) not loaded. Please ensure the CDN script is included.");
+        console.error("exportToExcel: window.XLSX is undefined. XLSX library might not be loaded.");
+        return;
+      }
+
+      const tableData = [
+        ["Roll No", ...subjectNames, "Total"] // Use dynamic subject names for header
+      ];
+      console.log("exportToExcel: Excel header prepared:", tableData[0]);
+
+      // Changed: Iterate over allMarksData instead of a filtered subset
+      allMarksData.forEach(student => { 
+        // Ensure exported marks match current numberOfSubjects
+        let studentMarksForExport = student.marks || Array(numberOfSubjects).fill(null); // Ensure it's an array, fill with null if empty
+        studentMarksForExport = studentMarksForExport.slice(0, numberOfSubjects); // Truncate or pad to current number of subjects
+
+        // Replace nulls with empty strings for better Excel display
+        const displayMarks = studentMarksForExport.map(mark => mark === null ? '' : mark);
+
+        const row = [student.rollNo, ...displayMarks, calculateTotal(studentMarksForExport)];
+        tableData.push(row);
+      });
+
+      const wb = window.XLSX.utils.book_new();
+      const ws = window.XLSX.utils.aoa_to_sheet(tableData);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Marks");
+      const filename = `marks_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      window.XLSX.writeFile(wb, filename);
+      console.log(`exportToExcel: Exported to file: ${filename}`);
+    });
+
+    // --- Initialization on window load ---
+    window.addEventListener('load', () => {
+        console.log("Window loaded. Starting application initialization.");
+        updateLoadingState(true); // Show loading overlay initially
+        initFirebaseAndAuth(); // Start Firebase initialization
+        setupSpeechRecognition(); // Setup speech recognition API
+    });
+  </script>
+<style>
+    /* Import Inter font */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap');
+
+    body {
+      font-family: 'Inter', sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #1a202c; /* Dark background */
+      color: #ffffff; /* White text */
+      background-attachment: fixed;
+      background-image: url('https://media.istockphoto.com/id/1367728606/vector/conversational-ai-concept-natural-language-processing-nlp-computational-linguistics-concept.jpg?s=612x612&w=0&k=20&c=YB1PDavNi9HCRnFlhb2g5y9lhOl3CIAxbSNvZifB_F0=');
+      background-size: cover;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .container {
+      max-width: 960px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .card {
+      background-color: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(5px);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      transition: transform 0.2s, box-shadow 0.2s;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 20px;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 10px rgba(0, 0, 0, 0.2);
+    }
+
+    h2 {
+      font-size: 1.875rem; /* text-3xl */
+      font-weight: 700; /* font-bold */
+      margin-bottom: 1.5rem; /* mb-6 */
+      text-align: center;
+      padding: 8px 16px;
+    }
+
+    .button-group {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 16px; /* gap-4 */
+      margin-bottom: 1.5rem; /* mb-6 */
+    }
+
+    button {
+      padding: 10px 24px; /* py-2 px-6 */
+      font-weight: 600; /* font-semibold */
+      border-radius: 8px; /* rounded-lg */
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); /* shadow-md */
+      transition: background-color 0.2s, transform 0.2s;
+      border: none;
+      cursor: pointer;
+      color: #ffffff;
+    }
+
+    button.blue {
+      background-color: #2563eb; /* bg-blue-600 */
+    }
+    button.blue:hover {
+      background-color: #1d4ed8; /* hover:bg-blue-700 */
+    }
+
+    button.red {
+      background-color: #dc2626; /* bg-red-600 */
+    }
+    button.red:hover {
+      background-color: #b91c1c; /* hover:bg-red-700 */
+    }
+
+    button.green {
+      background-color: #16a34a; /* bg-green-600 */
+    }
+    button.green:hover {
+      background-color: #15803d; /* hover:bg-green-700 */
+    }
+
+    button.purple {
+      background-color: #9333ea; /* bg-purple-600 */
+    }
+    button.purple:hover {
+      background-color: #7e22ce; /* hover:bg-purple-700 */
+    }
+
+    button.yellow { /* New style for Add Column button */
+      background-color: #d97706; /* bg-amber-600 */
+    }
+    button.yellow:hover {
+      background-color: #b45309; /* hover:bg-amber-700 */
+    }
+
+
+    #output {
+      margin-top: 1rem; /* mt-4 */
+      color: #4ade80; /* text-green-400 */
+      font-weight: 700; /* font-bold */
+      font-size: 1.125rem; /* text-lg */
+      text-align: center;
+      padding: 8px 16px;
+    }
+
+    .user-id {
+      margin-top: 0.5rem; /* mt-2 */
+      font-size: 0.875rem; /* text-sm */
+      color: #d1d5db; /* text-gray-300 */
+      text-align: center;
+      word-break: break-all; /* Ensure long IDs wrap */
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 24px; /* mt-6 */
+      background-color: rgba(0, 0, 0, 0.5); /* Semi-transparent background for table */
+      border-radius: 8px;
+      overflow: hidden; /* Ensures rounded corners apply to content */
+    }
+
+    th, td {
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      padding: 8px;
+      text-align: center;
+      color: white; /* Ensure text is visible on dark background */
+      min-width: 80px; /* Ensure columns have a minimum width */
+    }
+
+    th {
+      background-color: rgba(255, 255, 255, 0.1);
+      font-weight: bold;
+    }
+
+    td.selected, th.selected { /* Apply 'selected' style to both td and th */
+      background-color: #ffff99 !important; /* Tailwind's bg-yellow-200 might conflict, use important */
+      color: #333 !important;
+    }
+    
+    td.next-input-cell { /* New style for the next input cell */
+        background-color: rgba(255, 255, 0, 0.3); /* Slightly transparent yellow */
+        border: 2px solid #ffff99;
+    }
+
+    td:hover, th[contenteditable="true"]:hover { /* Hover for editable subject headers */
+      background-color: rgba(255, 255, 255, 0.2);
+      cursor: pointer;
+    }
+
+    /* Styling for editable headers */
+    th[contenteditable="true"]:focus {
+        outline: none;
+        background-color: rgba(255, 255, 255, 0.3);
+        box-shadow: 0 0 0 2px #ffff99;
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 768px) {
+      body {
+        padding: 10px;
+      }
+      h2 {
+        font-size: 1.5rem; /* Adjust title size for smaller screens */
+      }
+      button {
+        width: 100%; /* Full width buttons on small screens */
+      }
+      .button-group {
+        flex-direction: column;
+        gap: 10px;
+      }
+      table {
+        font-size: 0.8rem; /* Smaller font for table on small screens */
+      }
+      th, td {
+        padding: 6px 4px; /* Adjust padding */
+        min-width: 60px; /* Smaller min-width */
+      }
+    }
+
+    .loading-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        background-color: #1a202c;
+        color: #ffffff;
+        text-align: center;
+        padding: 20px;
+    }
+    .loading-container p {
+        margin-bottom: 10px;
+    }
+    .loading-container .error-message {
+        color: #ef4444; /* text-red-500 */
+        font-size: 0.9rem;
+        margin-top: 10px;
+    }
+
+    /* Highlight for active student row */
+    .active-student-row {
+        background-color: rgba(100, 100, 255, 0.2); /* Light blue highlight */
+    }
+
+    /* Modal Overlay */
+    .modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.7);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000; /* Ensure it's on top */
+    }
+
+    /* Modal Content */
+    .modal-content {
+        background-color: #ffffff;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+        max-width: 400px;
+        width: 90%;
+        text-align: center;
+    }
+
+    .modal-content button {
+        margin: 0 10px;
+        /* Tailwind styles applied directly to buttons inside modal */
+    }
+
+    .modal-overlay.hidden {
+        display: none;
+    }
+  </style>
+</body>
+</html>

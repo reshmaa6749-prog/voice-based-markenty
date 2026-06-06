@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Voice Marks Entry — A/B/C</title>
+<style>
+  body { font-family: Inter, Arial, sans-serif; background:#0f172a; color:#e6eef8; padding:18px;
+    background-image: url('https://media.istockphoto.com/id/1367728606/vector/conversational-ai-concept-natural-language-processing-nlp-computational-linguistics-concept.jpg?s=612x612&w=0&k=20&c=YB1PDavNi9HCRnFlhb2g5y9lhOl3CIAxbSNvZifB_F0='); 
+  background-size: cover;
+background-attachment: fixed;}
+  h1 { margin:0 0 12px 0; font-size:18px; }
+  .controls { margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap; }
+  button { padding:8px 12px; border:0; border-radius:6px; cursor:pointer; }
+  .primary{background:#2563eb;color:white;}
+  .danger{background:#dc2626;color:white;}
+  .green{background:#16a34a;color:white;}
+  table { width:100%; border-collapse:collapse; margin-top:12px; background: rgba(255,255,255,0.03); }
+  th,td { border:1px solid rgba(255,255,255,0.06); padding:6px; text-align:center; }
+  td.selected { background:#fde68a; color:#111; }
+  td[contenteditable="true"] { outline:2px dashed #93c5fd; background:#fff; color:#000; }
+  #output { margin-top:10px; font-weight:bold; color:#d1fae5; }
+  #nextRoll { font-size:13px; color:#cbd5e1; margin-top:6px; }
+  .small { font-size:13px; color:#cbd5e1; }
+  table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  background: rgba(255, 255, 255, 0.15); /* semi-transparent white */
+  color: #fff;                            /* white text for contrast */
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);   /* subtle shadow for visibility */
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+th {
+  background: rgba(37, 99, 235, 0.9);  /* strong semi-transparent blue */
+  color: #fff;
+  padding: 10px;
+  font-weight: bold;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+td {
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  padding: 8px;
+  text-align: center;
+  font-size: 14px;
+  background: rgba(0, 0, 0, 0.3); /* dark translucent for readability */
+  color: #fff;
+}
+
+/* highlight selected cell */
+td.selected, tr td.selected {
+  background: rgba(253, 224, 71, 0.8); /* yellow translucent */
+  color: #111;
+}
+
+/* editable cell */
+td[contenteditable="true"] {
+  outline: 2px dashed rgba(255,255,255,0.8);
+  background: rgba(240, 249, 255, 0.9);
+  color: #111;
+}
+
+</style>
+</head>
+<body>
+<h1>Voice Marks Entry (Sections A/B/C)</h1>
+
+<div class="controls">
+  <button id="btnStart" class="primary">Start Voice</button>
+  <button id="btnStop" class="danger">Stop Voice</button>
+  <button id="btnNext" class="green">Next Student</button>
+  <button id="btnClear" style="background:#444;color:white;">Clear All</button>
+  <button id="btnCSV" style="background:#3e08b2;color:white;">Download CSV</button>
+ <button id="btnDeleteRow" class="danger">Delete Selected Row</button>
+<button id="btnDeleteAll" style="background:#6b7280;color:white;">Delete All Rows</button>
+
+</div>
+
+<div id="nextRoll" class="small"></div>
+<div id="output">Ready — click Start Voice and speak numbers (e.g. "one zero one one zero" or "10110")</div>
+
+
+<table>
+  <thead>
+    <tr id="headerRow"><th>Roll No</th></tr>
+  </thead>
+  <tbody id="tableBody"></tbody>
+</table>
+
+<script>
+/* CONFIG */
+const A_COUNT = 10;
+const B_PAIRS = 5;   // 5 pairs -> 10 cells (B1a,B1b,...)
+const C_COUNT = 5;
+const MAX_CELLS = A_COUNT + B_PAIRS * 2 + C_COUNT;
+
+/* State */
+let rollPrefix = "23mss";
+let rollNumber = 1;
+let tableData = []; // { rollNo: string, marks: [null,...], total: number }
+let currentCellIndex = 0;
+let selectedCell = null; // { rowIndex, cellIndex } or null
+
+/* Speech state */
+let recognition = null;
+let isListening = false;
+let prevTokens = []; // tokens from previous processed transcript (to avoid duplicates)
+
+/* Build headers */
+(function buildHeaders() {
+  const hr = document.getElementById('headerRow');
+  for (let i = 1; i <= A_COUNT; i++) hr.innerHTML += `<th>A${i}</th>`;
+  for (let i = 1; i <= B_PAIRS; i++) hr.innerHTML += `<th>B${i}a</th><th>B${i}b</th>`;
+  for (let i = 1; i <= C_COUNT; i++) hr.innerHTML += `<th>C${i}</th>`;
+  hr.innerHTML += `<th>Total</th>`;
+})();
+
+/* Persistence helpers */
+function saveState() {
+  localStorage.setItem('fast_marks_state', JSON.stringify({
+    rollPrefix, rollNumber, tableData
+  }));
+}
+function loadState() {
+  const raw = localStorage.getItem('fast_marks_state');
+  if (!raw) return false;
+  try {
+    const d = JSON.parse(raw);
+    rollPrefix = d.rollPrefix || rollPrefix;
+    rollNumber = d.rollNumber || rollNumber;
+    tableData = d.tableData || [];
+    return true;
+  } catch { return false; }
+}
+
+/* UI helpers */
+function setOutput(msg) { document.getElementById('output').textContent = msg; }
+function updateNextRollDisplay() {
+  document.getElementById('nextRoll').textContent = `Next Roll: ${rollPrefix}${String(rollNumber).padStart(3,'0')}`;
+}
+
+function clearSelection() {
+  document.querySelectorAll('td.selected').forEach(td => td.classList.remove('selected'));
+  selectedCell = null;
+}
+
+/* Create / Render rows */
+function createNewRow() {
+  const rn = `${rollPrefix}${String(rollNumber).padStart(3,'0')}`;
+  tableData.push({ rollNo: rn, marks: Array(MAX_CELLS).fill(null), total: 0 });
+  rollNumber++;
+  currentCellIndex = 0;
+  saveState();
+  renderTable();
+}
+
+function renderTable() {
+  const tb = document.getElementById('tableBody');
+  tb.innerHTML = '';
+  tableData.forEach((st, rIdx) => {
+    const tr = document.createElement('tr');
+    const rollTd = document.createElement('td');
+    rollTd.textContent = st.rollNo;
+    rollTd.contentEditable = "true";
+    // When user edits the LAST row's roll no, update prefix & next roll
+    rollTd.addEventListener('input', () => {
+      st.rollNo = rollTd.textContent.trim();
+      if (rIdx === tableData.length - 1) parseRollPrefixFromString(st.rollNo);
+      updateNextRollDisplay();
+      saveState();
+    });
+    tr.appendChild(rollTd);
+
+    for (let c = 0; c < MAX_CELLS; c++) {
+      const td = document.createElement('td');
+      td.textContent = st.marks[c] != null ? st.marks[c] : '';
+      // click to select cell for editing
+      td.addEventListener('click', () => {
+        clearSelection();
+        td.classList.add('selected');
+        selectedCell = { rowIndex: rIdx, cellIndex: c };
+        setOutput(`Selected cell ${cellLabel(c)} for editing`);
+      });
+      // double-click to type
+      td.addEventListener('dblclick', () => {
+        td.contentEditable = "true";
+        td.focus();
+      });
+      td.addEventListener('blur', () => {
+        // handle user-entered text
+        td.contentEditable = "false";
+        const val = td.textContent.trim();
+        if (val === '') {
+          st.marks[c] = null;
+        } else {
+          const n = parseInt(val);
+          if (!isNaN(n) && isValidMark(n, c)) {
+            st.marks[c] = n;
+          } else {
+            // revert invalid
+            td.textContent = st.marks[c] != null ? st.marks[c] : '';
+            setOutput(`Invalid value for ${cellLabel(c)} — reverted`);
+            return;
+          }
+        }
+        updateTotals(rIdx);
+        saveState();
+      });
+      tr.appendChild(td);
+    }
+
+    const totalTd = document.createElement('td');
+    totalTd.textContent = st.total;
+    tr.appendChild(totalTd);
+    tb.appendChild(tr);
+  });
+  updateNextRollDisplay();
+}
+
+/* Utilities */
+function cellLabel(index) {
+  if (index < A_COUNT) return `A${index+1}`;
+  if (index < A_COUNT + B_PAIRS*2) {
+    const bIndex = index - A_COUNT;
+    return `B${Math.floor(bIndex/2)+1}${bIndex%2===0 ? 'a':'b'}`;
+  }
+  const cIndex = index - (A_COUNT + B_PAIRS*2);
+  return `C${cIndex+1}`;
+}
+function isValidMark(val, idx) {
+  if (val == null || isNaN(val)) return false;
+  if (idx < A_COUNT) return val === 0 || val === 1;
+  if (idx < A_COUNT + B_PAIRS*2) return val >= 0 && val <= 7;
+  return val >= 0 && val <= 10;
+}
+function updateTotals(rowIdx) {
+  const marks = tableData[rowIdx].marks;
+  let total = 0;
+  // A: sum of first A_COUNT
+  for (let i=0;i<A_COUNT;i++) total += Number(marks[i] || 0);
+  // B: max of each pair
+  let bStart = A_COUNT;
+  for (let p=0;p<B_PAIRS;p++) {
+    const v1 = Number(marks[bStart + p*2] || 0);
+    const v2 = Number(marks[bStart + p*2 + 1] || 0);
+    total += Math.max(v1, v2);
+  }
+  // C: top 3 of 5
+  let cStart = A_COUNT + B_PAIRS*2;
+  const cvals = [];
+  for (let i=0;i<C_COUNT;i++) {
+    const v = marks[cStart + i];
+    if (v != null && !isNaN(v)) cvals.push(Number(v));
+  }
+  cvals.sort((a,b)=>b-a);
+  total += cvals.slice(0,3).reduce((s,x)=>s+x,0);
+  tableData[rowIdx].total = total;
+  saveState();
+  renderTable();
+}
+
+/* Parse roll prefix like "24mss001" into prefix and next number */
+function parseRollPrefixFromString(s) {
+  const m = s.match(/^(.+?)(\d{1,})$/);
+  if (m) {
+    rollPrefix = m[1];
+    const n = parseInt(m[2], 10);
+    if (!isNaN(n)) {
+      // Next roll should be the edited number (so next student uses this as starting)
+      rollNumber = n + 1;
+    }
+  }
+}
+
+/* Tokenization: convert transcript into numeric token array
+   Heuristics:
+   - If the transcript is a continuous digits string (no spaces) -> split into characters (e.g. "10110" => [1,0,1,1,0])
+   - Else split on whitespace and parse words/numbers. Support some two-word tens like "seventy seven".
+*/
+const units = { zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9};
+const tens = { ten:10, twenty:20, thirty:30, forty:40, fifty:50, sixty:60, seventy:70, eighty:80, ninety:90, hundred:100 };
+
+function tokenizeTranscript(transcript) {
+  transcript = transcript.toLowerCase().replace(/[,\?!.]/g,' ').replace(/\band\b/g,' ').trim();
+  if (!transcript) return [];
+  // If it's digits only without spaces, treat as character stream
+  if (/^[0-9]+$/.test(transcript) && !/\s/.test(transcript)) {
+    return transcript.split('').map(ch => parseInt(ch,10));
+  }
+  const words = transcript.split(/\s+/).filter(Boolean);
+  const tokens = [];
+  for (let i=0;i<words.length;i++) {
+    const w = words[i];
+    // direct numeric like "77"
+    if (/^\d+$/.test(w)) {
+      tokens.push(parseInt(w,10));
+      continue;
+    }
+    // tens+unit e.g., "seventy seven"
+    if (tens[w] !== undefined) {
+      let value = tens[w];
+      if (i+1 < words.length && units[words[i+1]] !== undefined) {
+        value += units[words[i+1]];
+        i++; // consume next
+      }
+      tokens.push(value);
+      continue;
+    }
+    if (units[w] !== undefined) {
+      tokens.push(units[w]);
+      continue;
+    }
+    // fallback: try parsing as number
+    const p = parseInt(w,10);
+    if (!isNaN(p)) tokens.push(p);
+    // ignore unknown words
+  }
+  return tokens;
+}
+
+/* Compare tokens arrays and get new appended tokens - find longest common prefix */
+function newTokensSince(prev, curr) {
+  let i=0;
+  while (i<prev.length && i<curr.length && prev[i] === curr[i]) i++;
+  return curr.slice(i);
+}
+
+/* Assign numeric tokens to cells sequentially. If a token alone is invalid for a cell that could accept
+   a two-digit number (C section), try to combine token + nextToken to form a valid number. */
+function assignTokensToCells(newTokenValues) {
+  if (tableData.length === 0) return;
+  const lastRowIdx = tableData.length - 1;
+  let i = 0;
+  while (i < newTokenValues.length) {
+    let value = newTokenValues[i];
+    // Determine target cell
+    const targetCellIdx = (selectedCell && selectedCell.rowIndex === lastRowIdx) ? selectedCell.cellIndex : currentCellIndex;
+    // If token is NaN skip
+    if (value == null || isNaN(value)) { i++; continue; }
+    // If token is single-digit but cell accepts up to 10, we can try to combine with next token to make 10 (special case).
+    let assigned = false;
+    // Try direct assign
+    if (isValidMark(value, targetCellIdx)) {
+      tableData[lastRowIdx].marks[targetCellIdx] = value;
+      assigned = true;
+      i++;
+    } else {
+      // Try combine with next token for multi-digit number (e.g., '1' + '0' => 10) only if next exists
+      if (i+1 < newTokenValues.length) {
+        const combined = Number(String(newTokenValues[i]) + String(newTokenValues[i+1]));
+        if (isValidMark(combined, targetCellIdx)) {
+          tableData[lastRowIdx].marks[targetCellIdx] = combined;
+          assigned = true;
+          i += 2; // consumed two tokens
+        }
+      }
+      // If still not assigned, token might be invalid for this cell -> skip it and notify user
+      if (!assigned) {
+        setOutput(`Token ${value} invalid for ${cellLabel(targetCellIdx)} — ignored`);
+        i++;
+      }
+    }
+    if (assigned) {
+      // advance cell only if not editing a selected cell
+      if (!(selectedCell && selectedCell.rowIndex === lastRowIdx)) {
+        if (currentCellIndex < MAX_CELLS - 1) currentCellIndex++;
+      } else {
+        // if editing a selected cell, clear selection after assignment
+        clearSelection();
+      }
+      updateTotals(lastRowIdx);
+      saveState();
+      setOutput(`Entered ${tableData[lastRowIdx].marks[targetCellIdx]} → ${cellLabel(targetCellIdx)}`);
+    }
+  }
+}
+
+/* Setup Web Speech Recognition */
+function setupRecognition() {
+  if (typeof window.SpeechRecognition === 'undefined' && typeof window.webkitSpeechRecognition === 'undefined') {
+    setOutput('Speech Recognition API not supported by this browser (use Chrome).');
+    return;
+  }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = 'en-US';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  recognition.onresult = (ev) => {
+    // Get latest transcript fragment (last result)
+    const lastResult = ev.results[ev.results.length - 1];
+    const transcript = lastResult[0].transcript.trim().toLowerCase();
+    // Tokenize
+    const tokens = tokenizeTranscript(transcript);
+    // Determine newly appended tokens compared to prevTokens
+    const newTokens = newTokensSince(prevTokens, tokens);
+    if (newTokens.length > 0) {
+      // assign them to cells
+      assignTokensToCells(newTokens);
+      // update prevTokens to current tokens so duplicates won't be reprocessed
+      prevTokens = tokens.slice();
+    }
+    // Note: We intentionally DO NOT stop recognition after each token; interim processing gives low latency.
+  };
+
+  recognition.onend = () => {
+    // restart automatically if user hasn't pressed stop
+    if (isListening) {
+      try { recognition.start(); } catch (e) { /* ignore */ }
+    }
+  };
+
+  recognition.onerror = (e) => {
+    console.error('recognition error', e);
+    setOutput('Speech recognition error: ' + (e.error || e.message || 'unknown'));
+  };
+}
+
+/* Controls */
+document.getElementById('btnStart').addEventListener('click', () => {
+  if (!recognition) setupRecognition();
+  if (!recognition) return;
+  if (!isListening) {
+    try {
+      recognition.start();
+      isListening = true;
+      prevTokens = []; // reset token tracking whenever starting fresh
+      setOutput('Listening — speak numbers or sequences (e.g. "1 0 1 1 0" or "10110")');
+    } catch (e) {
+      console.error(e);
+      setOutput('Could not start recognition: ' + e.message);
+    }
+  }
+});
+document.getElementById('btnStop').addEventListener('click', () => {
+  if (recognition && isListening) {
+    recognition.stop();
+    isListening = false;
+    setOutput('Stopped listening.');
+  }
+});
+document.getElementById('btnNext').addEventListener('click', () => {
+  createNewRow();
+  setOutput('Next student created. Ready.');
+});
+document.getElementById('btnClear').addEventListener('click', () => {
+  if (confirm('Clear all saved data?')) {
+    localStorage.removeItem('fast_marks_state');
+    rollPrefix = '23mss'; rollNumber = 1; tableData = [];
+    prevTokens = [];
+    createNewRow();
+    setOutput('Cleared.');
+  }
+});
+
+/* Initialize on load */
+if (!loadState()) {
+  createNewRow();
+} else {
+  // Ensure at least one row
+  if (tableData.length === 0) createNewRow();
+  renderTable();
+}
+updateNextRollDisplay();
+/* CSV Export */
+document.getElementById('btnCSV').addEventListener('click', () => {
+  if (tableData.length === 0) {
+    alert('No data to export.');
+    return;
+  }
+
+  // Build CSV header
+  let headers = ['Roll No'];
+  for (let i = 1; i <= A_COUNT; i++) headers.push(`A${i}`);
+  for (let i = 1; i <= B_PAIRS; i++) { headers.push(`B${i}a`, `B${i}b`); }
+  for (let i = 1; i <= C_COUNT; i++) headers.push(`C${i}`);
+  headers.push('Total');
+
+  // Build rows
+  let rows = tableData.map(st => {
+    return [st.rollNo, ...st.marks.map(m => m === null ? '' : m), st.total];
+  });
+
+  // Convert to CSV string
+  let csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+
+  // Trigger download
+  let blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  let url = URL.createObjectURL(blob);
+  let a = document.createElement("a");
+  a.href = url;
+  a.download = "marks.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+});
+// Delete Selected Row
+document.getElementById('btnDeleteRow').addEventListener('click', () => {
+  if (!selectedCell) {
+    alert('Please select a cell in the row you want to delete.');
+    return;
+  }
+  const rowIdx = selectedCell.rowIndex;
+  tableData.splice(rowIdx, 1); // remove from data
+  clearSelection();
+  saveState();
+  renderTable();
+  setOutput('Row deleted.');
+});
+
+// Delete All Rows
+document.getElementById('btnDeleteAll').addEventListener('click', () => {
+  if (confirm('Delete ALL rows?')) {
+    tableData = [];
+    rollNumber = 1;
+    clearSelection();
+    saveState();
+    renderTable();
+    setOutput('All rows deleted.');
+  }
+});
+// Keep track of last deleted row
+let lastDelete = null;
+
+// Delete Selected Row
+document.getElementById('btnDeleteRow').addEventListener('click', () => {
+  if (!selectedCell) {
+    alert('Please select a cell in the row you want to delete.');
+    return;
+  }
+  const rowIdx = selectedCell.rowIndex;
+  lastDelete = { row: tableData[rowIdx], index: rowIdx }; // save deleted row
+  tableData.splice(rowIdx, 1); // remove from data
+  clearSelection();
+  saveState();
+  renderTable();
+  setOutput('Row deleted. You can Undo.');
+});
+
+// Delete All Rows
+document.getElementById('btnDeleteAll').addEventListener('click', () => {
+  if (confirm('Delete ALL rows?')) {
+    lastDeleted = { row: [...tableData], index: null }; // backup all rows
+    tableData = [];
+    rollNumber = 1;
+    clearSelection();
+    saveState();
+    renderTable();
+    setOutput('All rows deleted. You can Undo.');
+  }
+});
+
+// Keep last deleted data
+let lastDeleted = null;
+
+// Delete Selected Row
+document.getElementById('btnDeleteRow').addEventListener('click', () => {
+  if (!selectedCell) {
+    alert('Please select a cell in the row you want to delete.');
+    return;
+  }
+  const rowIdx = selectedCell.rowIndex;
+
+  // Make a deep copy of the deleted row
+  lastDeleted = {
+    type: 'single',
+    row: JSON.parse(JSON.stringify(tableData[rowIdx])),
+    index: rowIdx
+  };
+
+  tableData.splice(rowIdx, 1); // remove row
+  clearSelection();
+  saveState();
+  renderTable();
+  setOutput('Row deleted. Click Undo to restore.');
+});
+
+// Delete All Rows
+document.getElementById('btnDeleteAll').addEventListener('click', () => {
+  if (confirm('Delete ALL rows?')) {
+    // Deep copy all rows
+    lastDeleted = {
+      type: 'all',
+      rows: JSON.parse(JSON.stringify(tableData))
+    };
+
+    tableData = [];
+    rollNumber = 1;
+    clearSelection();
+    saveState();
+    renderTable();
+    setOutput('All rows deleted. Click Undo to restore.');
+  }
+});
+</script>
+</body>
+</html>
